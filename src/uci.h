@@ -12,6 +12,7 @@ typedef struct {
     mtx_t mtx;
 } Info;
 
+extern int X[];
 extern Info ui;
 extern int64_t uciTimeBuffer;
 extern bool uciChess960;

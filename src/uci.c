@@ -29,6 +29,9 @@
 #define uci_printf(...) printf(__VA_ARGS__), fflush(stdout)
 #define uci_puts(s) puts(s), fflush(stdout)
 
+// Tuning parameters
+int X[] = {};
+
 static thrd_t Timer = 0;
 
 uint64_t uciHash = 2;
@@ -43,6 +46,14 @@ static void uci_format_score(int score, char str[17])
         sprintf(str, "cp %d", score * 100 / EP);
 }
 
+static double spsa_c(int x, int *lbound, int *ubound)
+{
+    const double c = 3.0 + abs(x) / 9.0;
+    *lbound = x - 9 * c;
+    *ubound = x + 9 * c;
+    return c;
+}
+
 static void intro()
 {
     uci_puts("id name Demolito " VERSION "\nid author lucasart");
@@ -52,6 +63,21 @@ static void intro()
     uci_printf("option name Threads type spin default %d min 1 max 63\n", WorkersCount);
     uci_printf("option name Time Buffer type spin default %" PRId64 " min 0 max 1000\n", uciTimeBuffer);
     uci_printf("option name UCI_Chess960 type check default %s\n", uciChess960 ? "true" : "false");
+
+    // Declare UCI options for tuning parameters
+    for (int i = 0; i < (int)(sizeof(X) / sizeof(int)); i++) {
+        int lbound, ubound;
+        spsa_c(X[i], &lbound, &ubound);
+        uci_printf("option name X%d type spin default %d min %d max %d\n", i, X[i], lbound, ubound);
+    }
+
+    // Prepare .var file for Joona's SPSA tuner with tuning parameters
+    for (int i = 0; i < (int)(sizeof(X) / sizeof(int)); i++) {
+        int lbound, ubound;
+        const double c = spsa_c(X[i], &lbound, &ubound);
+        uci_printf("X%d,%d,%d,%d,%.2f,0.002,0\n", i, X[i], lbound, ubound, c);
+    }
+
     uci_puts("uciok");
 }
 
@@ -78,6 +104,8 @@ static void setoption(char **linePos)
         Contempt = atoi(strtok_r(NULL, " \n", linePos));
     else if (!strcmp(name, "TimeBuffer"))
         uciTimeBuffer = atoi(strtok_r(NULL, " \n", linePos));
+    else if (*name == 'X')
+        X[atoi(name + 1)] = atoi(strtok_r(NULL, " \n", linePos));
 }
 
 static void position(char **linePos)
@@ -180,6 +208,9 @@ void uci_loop()
             memset(HashTable, 0, uciHash << 20);
             smp_clear();
             hashDate = 0;
+            search_init();
+            pst_init();
+            eval_init();
         } else if (!strcmp(token, "position"))
             position(&linePos);
         else if (!strcmp(token, "go"))
