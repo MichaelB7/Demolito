@@ -108,8 +108,8 @@ bool move_is_legal(const Position *pos, bitboard_t pins, move_t m)
     const int king = pos_king_square(pos, pos->turn);
 
     if (piece == KING) {
-        if (bb_test(pos->byColor[pos->turn], to)) {
-            // Castling: king can't move through attacked square, and rook can't be pinned
+        if (move_is_castling(pos, m)) {
+            // King can't move through attacked square, and rook can't be pinned
             assert(pos_piece_on(pos, to) == ROOK);
             const int kto = square_from(rank_of(from), from < to ? FILE_G : FILE_C);
             return !(pos->attacked & Segment[from][kto])
@@ -160,7 +160,8 @@ int move_see(const Position *pos, move_t m)
             moved = prom;
             gain[0] += seeValue[moved] - seeValue[PAWN];
         }
-    }
+    } else if (move_is_castling(pos, m))
+        return 0;  // Castling is encoded KxR
 
     // Easy case: to is not defended (~41% of the time)
     if (!bb_test(pos->attacked, to))
