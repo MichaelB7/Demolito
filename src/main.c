@@ -43,18 +43,19 @@ uint64_t test(bool perft, int depth)
     int64_t start = system_msec();
 
     for (int i = 0; fens[i]; i++) {
-        puts(fens[i]);
         pos_set(&rootPos, fens[i]);
         stack_clear(&rootStack);
         stack_push(&rootStack, rootPos.key);
 
         if (perft) {
-            nodes = gen_perft(&rootPos, depth, 0);
-            printf("perft(%d) = %" PRIu64 "\n", depth, nodes);
-        } else
+            nodes = gen_perft(&rootPos, depth, 1);
+            printf("%s, %" PRIu64 "\n", fens[i], nodes);
+        } else {
+            puts(fens[i]);
             nodes = search_go();
+            puts("");
+        }
 
-        puts("");
         result += nodes;
     }
 
