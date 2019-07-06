@@ -28,8 +28,9 @@ static int KingDistance[NB_SQUARE][NB_SQUARE];
 
 typedef struct {
     bitboard_t attacks[NB_COLOR][NB_PIECE + 1];
-    bitboard_t kingAttackZone[NB_COLOR];
+    bitboard_t kingAttackZone[NB_COLOR], kingCheckZone[NB_COLOR][ROOK + 1];
     int kingAttackCount[NB_COLOR], kingAttackWeight[NB_COLOR];
+    int kingCheckCount[NB_COLOR], kingCheckWeight[NB_COLOR];
 } EvalInfo;
 
 static bitboard_t pawn_attacks(const Position *pos, int color)
@@ -41,7 +42,8 @@ static bitboard_t pawn_attacks(const Position *pos, int color)
 
 static eval_t score_mobility(int p0, int piece, bitboard_t targets, int them, EvalInfo *ei)
 {
-    static const int KingAttackWeight[] = {15, 15, 25, 35};
+    static const int KingAttackWeight[] = {15, 15, 25};
+    static const int KingCheckWeight[] = {20, 20, 20};
 
     assert(KNIGHT <= p0 && p0 <= ROOK);
     assert(KNIGHT <= piece && piece <= QUEEN);
@@ -55,7 +57,12 @@ static eval_t score_mobility(int p0, int piece, bitboard_t targets, int them, Ev
 
     if (ei->kingAttackZone[them] & targets) {
         ei->kingAttackCount[them] += bb_count(ei->kingAttackZone[them] & targets);
-        ei->kingAttackWeight[them] += KingAttackWeight[piece];
+        ei->kingAttackWeight[them] += KingAttackWeight[p0];
+    }
+
+    if (ei->kingCheckZone[them][p0] & targets) {
+        ei->kingCheckCount[them] += bb_count(ei->kingCheckZone[them][p0] & targets);
+        ei->kingCheckWeight[them] += KingCheckWeight[p0];
     }
 
     const int count = AdjustCount[p0][bb_count(targets)];
@@ -172,7 +179,8 @@ static eval_t hanging(const Position *pos, int us, const EvalInfo *ei)
 
 static int safety(int us, const EvalInfo *ei)
 {
-    return -ei->kingAttackCount[us] * ei->kingAttackWeight[us];
+    return -ei->kingAttackCount[us] * ei->kingAttackWeight[us]
+        -ei->kingCheckCount[us] * ei->kingCheckWeight[us];
 }
 
 static eval_t passer(int us, int pawn, int ourKing, int theirKing)
@@ -337,15 +345,23 @@ int evaluate(Worker *worker, const Position *pos)
 {
     assert(!pos->checkers);
     const int us = pos->turn, them = opposite(us);
-    eval_t e[NB_COLOR] = {pos->pst, {0, 0}};
 
+    eval_t e[NB_COLOR] = {pos->pst, {0, 0}};
     EvalInfo ei;
     memset(&ei, 0, sizeof(ei));
 
     for (int color = WHITE; color <= BLACK; color++) {
-        ei.attacks[color][KING] = KingAttacks[pos_king_square(pos, color)];
+        const int king = pos_king_square(pos, color);
+
+        ei.attacks[color][KING] = KingAttacks[king];
         ei.attacks[color][PAWN] = pawn_attacks(pos, color);
         ei.kingAttackZone[color] = ei.attacks[color][KING] & ~ei.attacks[color][PAWN];
+
+        const bitboard_t exclude = ei.attacks[color][PAWN] | ei.kingAttackZone[color];
+
+        ei.kingCheckZone[color][KNIGHT] = KnightAttacks[king] & ~exclude;
+        ei.kingCheckZone[color][BISHOP] = bb_bishop_attacks(king, pos_pieces(pos)) & ~exclude;
+        ei.kingCheckZone[color][ROOK] = bb_rook_attacks(king, pos_pieces(pos)) & ~exclude;
     }
 
     // Mobility first, because it fills in the attacks array
