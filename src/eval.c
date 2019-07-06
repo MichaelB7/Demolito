@@ -41,7 +41,7 @@ static bitboard_t pawn_attacks(const Position *pos, int color)
 
 static eval_t score_mobility(int p0, int piece, bitboard_t targets, int them, EvalInfo *ei)
 {
-    static const int KingAttackWeight[] = {10, 10, 20, 30};
+    static const int KingAttackWeight[] = {15, 15, 25, 35};
 
     assert(KNIGHT <= p0 && p0 <= ROOK);
     assert(KNIGHT <= piece && piece <= QUEEN);
