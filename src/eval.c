@@ -26,6 +26,11 @@ static bitboard_t AdjacentFiles[NB_FILE];
 static int KingDistance[NB_SQUARE][NB_SQUARE];
 static int SafetyCurve[4096];
 
+typedef struct {
+    bitboard_t attacks[NB_COLOR][NB_PIECE + 1];
+    bitboard_t kingAttackZone[NB_COLOR];
+} EvalInfo;
+
 static bitboard_t pawn_attacks(const Position *pos, int color)
 {
     const bitboard_t pawns = pos_pieces_cp(pos, color, PAWN);
@@ -49,26 +54,23 @@ static eval_t score_mobility(int p0, int piece, bitboard_t targets)
     return (eval_t) {Weight[piece].op * color, Weight[piece].eg * color};
 }
 
-static eval_t mobility(const Position *pos, int us, bitboard_t attacks[NB_COLOR][NB_PIECE + 1])
+static eval_t mobility(const Position *pos, int us, EvalInfo *ei)
 {
     const int them = opposite(us);
     eval_t result = {0, 0};
     bitboard_t occ;
     int from, piece;
 
-    attacks[us][KING] = KingAttacks[pos_king_square(pos, us)];
-    attacks[them][PAWN] = pawn_attacks(pos, them);
+    for (piece = KNIGHT; piece <= QUEEN; ei->attacks[us][piece++] = 0);
 
-    for (piece = KNIGHT; piece <= QUEEN; attacks[us][piece++] = 0);
-
-    const bitboard_t available = ~(pos_pieces_cpp(pos, us, KING, PAWN) | attacks[them][PAWN]);
+    const bitboard_t available = ~(pos_pieces_cpp(pos, us, KING, PAWN) | ei->attacks[them][PAWN]);
 
     // Knight mobility
     bitboard_t knights = pos_pieces_cp(pos, us, KNIGHT);
 
     while (knights) {
         bitboard_t targets = KnightAttacks[bb_pop_lsb(&knights)];
-        attacks[us][KNIGHT] |= targets;
+        ei->attacks[us][KNIGHT] |= targets;
         eval_add(&result, score_mobility(KNIGHT, KNIGHT, targets & available));
     }
 
@@ -78,7 +80,7 @@ static eval_t mobility(const Position *pos, int us, bitboard_t attacks[NB_COLOR]
 
     while (rookMovers) {
         bitboard_t targets = bb_rook_attacks(from = bb_pop_lsb(&rookMovers), occ);
-        attacks[us][piece = pos_piece_on(pos, from)] |= targets;
+        ei->attacks[us][piece = pos_piece_on(pos, from)] |= targets;
         eval_add(&result, score_mobility(ROOK, piece, targets & available));
     }
 
@@ -88,12 +90,12 @@ static eval_t mobility(const Position *pos, int us, bitboard_t attacks[NB_COLOR]
 
     while (bishopMovers) {
         bitboard_t targets = bb_bishop_attacks(from = bb_pop_lsb(&bishopMovers), occ);
-        attacks[us][piece = pos_piece_on(pos, from)] |= targets;
+        ei->attacks[us][piece = pos_piece_on(pos, from)] |= targets;
         eval_add(&result, score_mobility(BISHOP, piece, targets & available));
     }
 
-    attacks[us][NB_PIECE] = attacks[us][KNIGHT] | attacks[us][BISHOP] | attacks[us][ROOK]
-        | attacks[us][QUEEN];
+    ei->attacks[us][NB_PIECE] = ei->attacks[us][KNIGHT] | ei->attacks[us][BISHOP]
+        | ei->attacks[us][ROOK] | ei->attacks[us][QUEEN];
 
     return result;
 }
@@ -131,7 +133,7 @@ static eval_t pattern(const Position *pos, int us)
     return result;
 }
 
-static eval_t hanging(const Position *pos, int us, bitboard_t attacks[NB_COLOR][NB_PIECE + 1])
+static eval_t hanging(const Position *pos, int us, const EvalInfo *ei)
 {
     static const int Hanging[] = {119, 71, 118, 233, 0, 42};
 
@@ -139,11 +141,12 @@ static eval_t hanging(const Position *pos, int us, bitboard_t attacks[NB_COLOR][
     eval_t result = {0, 0};
 
     // Penalize hanging pieces in the opening
-    bitboard_t b = attacks[them][PAWN] & (pos->byColor[us] ^ pos_pieces_cp(pos, us, PAWN));
-    b |= (attacks[them][KNIGHT] | attacks[them][BISHOP]) & pos_pieces_cpp(pos, us, ROOK, QUEEN);
-    b |= pos_pieces_cp(pos, us, QUEEN) & attacks[them][ROOK];
-    b |= pos_pieces_cp(pos, us, PAWN) & attacks[them][NB_PIECE]
-        & ~(attacks[us][PAWN] | attacks[us][KING] | attacks[us][NB_PIECE]);
+    bitboard_t b = ei->attacks[them][PAWN] & (pos->byColor[us] ^ pos_pieces_cp(pos, us, PAWN));
+    b |= (ei->attacks[them][KNIGHT] | ei->attacks[them][BISHOP])
+        & pos_pieces_cpp(pos, us, ROOK, QUEEN);
+    b |= pos_pieces_cp(pos, us, QUEEN) & ei->attacks[them][ROOK];
+    b |= pos_pieces_cp(pos, us, PAWN) & ei->attacks[them][NB_PIECE]
+        & ~(ei->attacks[us][PAWN] | ei->attacks[us][KING] | ei->attacks[us][NB_PIECE]);
 
     while (b) {
         const int piece = pos_piece_on(pos, bb_pop_lsb(&b));
@@ -152,8 +155,8 @@ static eval_t hanging(const Position *pos, int us, bitboard_t attacks[NB_COLOR][
     }
 
     // Penalize hanging pawns in the endgame
-    b = pos_pieces_cp(pos, us, PAWN) & attacks[them][KING]
-        & ~(attacks[us][PAWN] | attacks[us][KING]);
+    b = pos_pieces_cp(pos, us, PAWN) & ei->attacks[them][KING]
+        & ~(ei->attacks[us][PAWN] | ei->attacks[us][KING]);
 
     if (b)
         result.eg -= Hanging[PAWN] * bb_count(b);
@@ -161,7 +164,7 @@ static eval_t hanging(const Position *pos, int us, bitboard_t attacks[NB_COLOR][
     return result;
 }
 
-static int safety(const Position *pos, int us, bitboard_t attacks[NB_COLOR][NB_PIECE + 1])
+static int safety(const Position *pos, int us, const EvalInfo *ei)
 {
     static const int RingAttack[] = {37, 51, 72, 68};
     static const int RingDefense[] = {24, 29,49, 48};
@@ -173,15 +176,13 @@ static int safety(const Position *pos, int us, bitboard_t attacks[NB_COLOR][NB_P
     int weight = 0, cnt = 0;
 
     // Attacks around the King
-    const bitboard_t dangerZone = attacks[us][KING] & ~attacks[us][PAWN];
-
     for (int piece = KNIGHT; piece <= QUEEN; piece++) {
-        const bitboard_t attacked = attacks[them][piece] & dangerZone;
+        const bitboard_t attacked = ei->attacks[them][piece] & ei->kingAttackZone[us];
 
         if (attacked) {
             cnt++;
             weight += bb_count(attacked) * RingAttack[piece];
-            weight -= bb_count(attacked & attacks[us][NB_PIECE]) * RingDefense[piece];
+            weight -= bb_count(attacked & ei->attacks[us][NB_PIECE]) * RingDefense[piece];
         }
     }
 
@@ -189,21 +190,21 @@ static int safety(const Position *pos, int us, bitboard_t attacks[NB_COLOR][NB_P
     const int king = pos_king_square(pos, us);
     const bitboard_t occ = pos_pieces(pos);
     const bitboard_t checks[] = {
-        KnightAttacks[king] & attacks[them][KNIGHT],
-        bb_bishop_attacks(king, occ) & attacks[them][BISHOP],
-        bb_rook_attacks(king, occ) & attacks[them][ROOK],
-        (bb_bishop_attacks(king, occ) | bb_rook_attacks(king, occ)) & attacks[them][QUEEN]
+        KnightAttacks[king] & ei->attacks[them][KNIGHT],
+        bb_bishop_attacks(king, occ) & ei->attacks[them][BISHOP],
+        bb_rook_attacks(king, occ) & ei->attacks[them][ROOK],
+        (bb_bishop_attacks(king, occ) | bb_rook_attacks(king, occ)) & ei->attacks[them][QUEEN]
     };
 
     for (int piece = KNIGHT; piece <= QUEEN; piece++)
         if (checks[piece]) {
-            const bitboard_t b = checks[piece] & ~(pos->byColor[them] | attacks[us][PAWN]
-                | attacks[us][KING]);
+            const bitboard_t b = checks[piece] & ~(pos->byColor[them] | ei->attacks[us][PAWN]
+                | ei->attacks[us][KING]);
 
             if (b) {
                 cnt++;
                 weight += bb_count(b) * CheckAttack[piece];
-                weight -= bb_count(b & attacks[us][NB_PIECE]) * CheckDefense[piece];
+                weight -= bb_count(b & ei->attacks[us][NB_PIECE]) * CheckDefense[piece];
             }
         }
 
@@ -249,8 +250,7 @@ static eval_t passer(int us, int pawn, int ourKing, int theirKing)
     return result;
 }
 
-static eval_t do_pawns(const Position *pos, int us, bitboard_t attacks[NB_COLOR][NB_PIECE + 1],
-    bitboard_t *passed)
+static eval_t do_pawns(const Position *pos, int us, const EvalInfo *ei, bitboard_t *passed)
 {
     static const eval_t Isolated[2] = {{15, 34}, {42, 30}};
     static const eval_t Backward[2] = {{17, 17}, {29, 21}};
@@ -290,7 +290,7 @@ static eval_t do_pawns(const Position *pos, int us, bitboard_t attacks[NB_COLOR]
 
         if (besides & (Rank[rank] | Rank[us == WHITE ? rank - 1 : rank + 1]))
             eval_add(&result, Connected[relative_rank(us, rank) - RANK_2]);
-        else if (!(PawnSpan[them][stop] & ourPawns) && bb_test(attacks[them][PAWN], stop))
+        else if (!(PawnSpan[them][stop] & ourPawns) && bb_test(ei->attacks[them][PAWN], stop))
             eval_sub(&result, Backward[exposed]);
         else if (!besides)
             eval_sub(&result, Isolated[exposed]);
@@ -310,7 +310,7 @@ static eval_t do_pawns(const Position *pos, int us, bitboard_t attacks[NB_COLOR]
     return result;
 }
 
-static eval_t pawns(Worker *worker, const Position *pos, bitboard_t attacks[NB_COLOR][NB_PIECE + 1])
+static eval_t pawns(Worker *worker, const Position *pos, const EvalInfo *ei)
 // Pawn evaluation is directly a diff, from white's pov. This halves the size of the table.
 {
     static const int FreePasser[] = {12, 18, 34, 92};
@@ -325,8 +325,8 @@ static eval_t pawns(Worker *worker, const Position *pos, bitboard_t attacks[NB_C
     else {
         pe->key = key;
         pe->passed = 0;
-        pe->eval = do_pawns(pos, WHITE, attacks, &pe->passed);
-        eval_sub(&pe->eval, do_pawns(pos, BLACK, attacks, &pe->passed));
+        pe->eval = do_pawns(pos, WHITE, ei, &pe->passed);
+        eval_sub(&pe->eval, do_pawns(pos, BLACK, ei, &pe->passed));
         e = pe->eval;
     }
 
@@ -399,19 +399,25 @@ int evaluate(Worker *worker, const Position *pos)
     const int us = pos->turn, them = opposite(us);
     eval_t e[NB_COLOR] = {pos->pst, {0, 0}};
 
-    bitboard_t attacks[NB_COLOR][NB_PIECE + 1];
+    EvalInfo ei;
+
+    for (int color = WHITE; color <= BLACK; color++) {
+        ei.attacks[color][KING] = KingAttacks[pos_king_square(pos, color)];
+        ei.attacks[color][PAWN] = pawn_attacks(pos, color);
+        ei.kingAttackZone[color] = ei.attacks[color][KING] & ~ei.attacks[color][PAWN];
+    }
 
     // Mobility first, because it fills in the attacks array
     for (int color = WHITE; color <= BLACK; color++)
-        eval_add(&e[color], mobility(pos, color, attacks));
+        eval_add(&e[color], mobility(pos, color, &ei));
 
     for (int color = WHITE; color <= BLACK; color++) {
-        e[color].op += safety(pos, color, attacks);
-        eval_add(&e[color], hanging(pos, color, attacks));
+        e[color].op += safety(pos, color, &ei);
+        eval_add(&e[color], hanging(pos, color, &ei));
         eval_add(&e[color], pattern(pos, color));
     }
 
-    eval_add(&e[WHITE], pawns(worker, pos, attacks));
+    eval_add(&e[WHITE], pawns(worker, pos, &ei));
 
     eval_t stm = e[us];
     eval_sub(&stm, e[them]);
