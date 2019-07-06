@@ -15,6 +15,7 @@
 */
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 #include "bitboard.h"
 #include "eval.h"
 #include "position.h"
@@ -24,11 +25,11 @@ static bitboard_t PawnSpan[NB_COLOR][NB_SQUARE];
 static bitboard_t PawnPath[NB_COLOR][NB_SQUARE];
 static bitboard_t AdjacentFiles[NB_FILE];
 static int KingDistance[NB_SQUARE][NB_SQUARE];
-static int SafetyCurve[4096];
 
 typedef struct {
     bitboard_t attacks[NB_COLOR][NB_PIECE + 1];
     bitboard_t kingAttackZone[NB_COLOR];
+    int kingAttackCount[NB_COLOR], kingAttackWeight[NB_COLOR];
 } EvalInfo;
 
 static bitboard_t pawn_attacks(const Position *pos, int color)
@@ -38,8 +39,10 @@ static bitboard_t pawn_attacks(const Position *pos, int color)
         | bb_shift(pawns & ~File[FILE_H], push_inc(color) + RIGHT);
 }
 
-static eval_t score_mobility(int p0, int piece, bitboard_t targets)
+static eval_t score_mobility(int p0, int piece, bitboard_t targets, int them, EvalInfo *ei)
 {
+    static const int KingAttackWeight[] = {10, 10, 20, 30};
+
     assert(KNIGHT <= p0 && p0 <= ROOK);
     assert(KNIGHT <= piece && piece <= QUEEN);
 
@@ -50,8 +53,13 @@ static eval_t score_mobility(int p0, int piece, bitboard_t targets)
     };
     static const eval_t Weight[] = {{9, 13}, {13, 12}, {9, 7}, {4, 7}};
 
-    const int color = AdjustCount[p0][bb_count(targets)];
-    return (eval_t) {Weight[piece].op * color, Weight[piece].eg * color};
+    if (ei->kingAttackZone[them] & targets) {
+        ei->kingAttackCount[them] += bb_count(ei->kingAttackZone[them] & targets);
+        ei->kingAttackWeight[them] += KingAttackWeight[piece];
+    }
+
+    const int count = AdjustCount[p0][bb_count(targets)];
+    return (eval_t) {Weight[piece].op * count, Weight[piece].eg * count};
 }
 
 static eval_t mobility(const Position *pos, int us, EvalInfo *ei)
@@ -61,8 +69,6 @@ static eval_t mobility(const Position *pos, int us, EvalInfo *ei)
     bitboard_t occ;
     int from, piece;
 
-    for (piece = KNIGHT; piece <= QUEEN; ei->attacks[us][piece++] = 0);
-
     const bitboard_t available = ~(pos_pieces_cpp(pos, us, KING, PAWN) | ei->attacks[them][PAWN]);
 
     // Knight mobility
@@ -71,7 +77,7 @@ static eval_t mobility(const Position *pos, int us, EvalInfo *ei)
     while (knights) {
         bitboard_t targets = KnightAttacks[bb_pop_lsb(&knights)];
         ei->attacks[us][KNIGHT] |= targets;
-        eval_add(&result, score_mobility(KNIGHT, KNIGHT, targets & available));
+        eval_add(&result, score_mobility(KNIGHT, KNIGHT, targets & available, them, ei));
     }
 
     // Lateral mobility
@@ -81,7 +87,7 @@ static eval_t mobility(const Position *pos, int us, EvalInfo *ei)
     while (rookMovers) {
         bitboard_t targets = bb_rook_attacks(from = bb_pop_lsb(&rookMovers), occ);
         ei->attacks[us][piece = pos_piece_on(pos, from)] |= targets;
-        eval_add(&result, score_mobility(ROOK, piece, targets & available));
+        eval_add(&result, score_mobility(ROOK, piece, targets & available, them, ei));
     }
 
     // Diagonal mobility
@@ -91,7 +97,7 @@ static eval_t mobility(const Position *pos, int us, EvalInfo *ei)
     while (bishopMovers) {
         bitboard_t targets = bb_bishop_attacks(from = bb_pop_lsb(&bishopMovers), occ);
         ei->attacks[us][piece = pos_piece_on(pos, from)] |= targets;
-        eval_add(&result, score_mobility(BISHOP, piece, targets & available));
+        eval_add(&result, score_mobility(BISHOP, piece, targets & available, them, ei));
     }
 
     ei->attacks[us][NB_PIECE] = ei->attacks[us][KNIGHT] | ei->attacks[us][BISHOP]
@@ -164,70 +170,9 @@ static eval_t hanging(const Position *pos, int us, const EvalInfo *ei)
     return result;
 }
 
-static int safety(const Position *pos, int us, const EvalInfo *ei)
+static int safety(int us, const EvalInfo *ei)
 {
-    static const int RingAttack[] = {37, 51, 72, 68};
-    static const int RingDefense[] = {24, 29,49, 48};
-    static const int CheckAttack[] = {77, 101, 98, 95};
-    static const int CheckDefense[] = {34, 52, 41, 48};
-    static const int BishopXRay = 73, RookXRay = 111;
-
-    const int them = opposite(us);
-    int weight = 0, cnt = 0;
-
-    // Attacks around the King
-    for (int piece = KNIGHT; piece <= QUEEN; piece++) {
-        const bitboard_t attacked = ei->attacks[them][piece] & ei->kingAttackZone[us];
-
-        if (attacked) {
-            cnt++;
-            weight += bb_count(attacked) * RingAttack[piece];
-            weight -= bb_count(attacked & ei->attacks[us][NB_PIECE]) * RingDefense[piece];
-        }
-    }
-
-    // Check threats
-    const int king = pos_king_square(pos, us);
-    const bitboard_t occ = pos_pieces(pos);
-    const bitboard_t checks[] = {
-        KnightAttacks[king] & ei->attacks[them][KNIGHT],
-        bb_bishop_attacks(king, occ) & ei->attacks[them][BISHOP],
-        bb_rook_attacks(king, occ) & ei->attacks[them][ROOK],
-        (bb_bishop_attacks(king, occ) | bb_rook_attacks(king, occ)) & ei->attacks[them][QUEEN]
-    };
-
-    for (int piece = KNIGHT; piece <= QUEEN; piece++)
-        if (checks[piece]) {
-            const bitboard_t b = checks[piece] & ~(pos->byColor[them] | ei->attacks[us][PAWN]
-                | ei->attacks[us][KING]);
-
-            if (b) {
-                cnt++;
-                weight += bb_count(b) * CheckAttack[piece];
-                weight -= bb_count(b & ei->attacks[us][NB_PIECE]) * CheckDefense[piece];
-            }
-        }
-
-    // Bishop X-Ray threats
-    bitboard_t bishops = BishopPseudoAttacks[king] & pos_pieces_cpp(pos, them, BISHOP, QUEEN);
-
-    while (bishops)
-        if (!(Segment[king][bb_pop_lsb(&bishops)] & pos->byPiece[PAWN])) {
-            cnt++;
-            weight += BishopXRay;
-        }
-
-    // Rook X-Ray threats
-    bitboard_t rooks = RookPseudoAttacks[king] & pos_pieces_cpp(pos, them, ROOK, QUEEN);
-
-    while (rooks)
-        if (!(Segment[king][bb_pop_lsb(&rooks)] & pos->byPiece[PAWN])) {
-            cnt++;
-            weight += RookXRay;
-        }
-
-    const int idx = weight * (1 + cnt) / 4;
-    return -SafetyCurve[min(idx, 4096)];
+    return -ei->kingAttackCount[us] * ei->kingAttackWeight[us];
 }
 
 static eval_t passer(int us, int pawn, int ourKing, int theirKing)
@@ -386,11 +331,6 @@ void eval_init()
             const int fileDist = abs(file_of(s1) - file_of(s2));
             KingDistance[s1][s2] = max(rankDist, fileDist);
         }
-
-    for (int i = 0; i < 4096; i++) {
-        const int x = pow((double)i, 1.062) + 0.5;
-        SafetyCurve[i] = x > 800 ? SafetyCurve[i - 1] + 1 : x;
-    }
 }
 
 int evaluate(Worker *worker, const Position *pos)
@@ -400,6 +340,7 @@ int evaluate(Worker *worker, const Position *pos)
     eval_t e[NB_COLOR] = {pos->pst, {0, 0}};
 
     EvalInfo ei;
+    memset(&ei, 0, sizeof(ei));
 
     for (int color = WHITE; color <= BLACK; color++) {
         ei.attacks[color][KING] = KingAttacks[pos_king_square(pos, color)];
@@ -412,7 +353,7 @@ int evaluate(Worker *worker, const Position *pos)
         eval_add(&e[color], mobility(pos, color, &ei));
 
     for (int color = WHITE; color <= BLACK; color++) {
-        e[color].op += safety(pos, color, &ei);
+        e[color].op += safety(color, &ei);
         eval_add(&e[color], hanging(pos, color, &ei));
         eval_add(&e[color], pattern(pos, color));
     }
