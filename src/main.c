@@ -13,6 +13,7 @@
  * You should have received a copy of the GNU General Public License along with this program. If
  * not, see <http://www.gnu.org/licenses/>.
 */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +27,11 @@
 #include "search.h"
 #include "smp.h"
 #include "uci.h"
+
+char Version[] = "";
+char my_date[64];
+static char months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+static char date[] = __DATE__;
 
 uint64_t test(bool perft, int depth)
 {
@@ -72,6 +78,24 @@ uint64_t test(bool perft, int depth)
 
 int main(int argc, char **argv)
 {
+	printf("Demolito %s", Version);
+	
+	if (strlen(Version) == 0) {
+		int day, month, year;
+		
+		strcpy(my_date, date);
+		char *str = strtok(my_date, " "); // month
+		for (month = 1; strncmp(str, &months[3 * month - 3], 3) != 0; month++);
+		str = strtok(NULL, " "); // day
+		day = atoi(str);
+		str = strtok(NULL, " "); // year
+		year = atoi(str);
+		
+		printf("%02d-%02d-%02d", year, month, day );
+	}
+	
+	printf("\nCompiled for Picochess by Scally\n");
+	
     bb_init();
     pos_init();
     pst_init();

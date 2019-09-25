@@ -8,7 +8,7 @@ CC = gcc
 CF = -std=gnu11 -DNDEBUG -O3 -flto -Wfatal-errors -Wall -Wextra -Wshadow
 
 # Linking flags
-LF =make cle -lm -lpthread
+LF = -lm -lpthread
 
 # Output file name (add .exe for Windows)
 OUT = demolito
