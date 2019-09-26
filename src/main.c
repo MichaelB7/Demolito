@@ -91,10 +91,8 @@ int main(int argc, char **argv)
 		str = strtok(NULL, " "); // year
 		year = atoi(str);
 		
-		printf("%02d-%02d-%02d", year, month, day );
+		printf("%02d-%02d-%02d\n", year, month, day );
 	}
-	
-	printf("\nCompiled for Picochess by Scally\n");
 	
     bb_init();
     pos_init();
